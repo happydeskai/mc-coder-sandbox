@@ -1,0 +1,52 @@
+# Runs the Mission Control coder App boundary tests on this sandbox only.
+# Manual only: someone with write access clicks "Run workflow". Never triggered by pushes or PRs.
+name: boundary-tests
+on:
+  workflow_dispatch:
+
+# The built-in GITHUB_TOKEN gets read-only access; every test uses the App's own token instead.
+permissions:
+  contents: read
+
+jobs:
+  boundary-tests:
+    if: github.repository == 'happydeskai/mc-coder-sandbox'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "pyjwt[crypto]==2.9.0" "requests==2.32.3"
+      - name: Run boundary tests
+        env:
+          MC_CODER_APP_ID: ${{ secrets.MC_CODER_APP_ID }}
+          MC_CODER_APP_KEY: ${{ secrets.MC_CODER_APP_KEY }}
+          MC_TEST_REPO: ${{ github.repository }}
+        run: |
+          test -n "$MC_CODER_APP_ID" || { echo "Secret MC_CODER_APP_ID is missing"; exit 1; }
+          test -n "$MC_CODER_APP_KEY" || { echo "Secret MC_CODER_APP_KEY is missing"; exit 1; }
+          python3 tools/negative_tests.py --out "$RUNNER_TEMP/results.json"
+      - name: Results
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/results.json" ]; then
+            echo "RESULTS_JSON_BEGIN"; cat "$RUNNER_TEMP/results.json"; echo; echo "RESULTS_JSON_END"
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          d = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "results.json")))
+          print(f"## Boundary tests: {d['passed']}/{d['total']} passed\n")
+          print("| | ID | Check | Expected | Detail |\n|---|---|---|---|---|")
+          for r in d["results"]:
+              print(f"| {'✅' if r['pass'] else '❌'} | {r['id']} | {r['check']} | {r['expected']} | {r['detail'][:80].replace('|', '/')} |")
+          PY
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: boundary-results
+          path: ${{ runner.temp }}/results.json
+          if-no-files-found: ignore
