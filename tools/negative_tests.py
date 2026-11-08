@@ -100,8 +100,12 @@ with tempfile.TemporaryDirectory() as d:
     git("-c", "user.name=negtest", "-c", "user.email=negtest@invalid", "commit", "--allow-empty", "-qm", "negtest push to default", cwd=d)
     code, out = git("push", "origin", f"HEAD:{default}", cwd=d)
     record("N2", f"git push to {default}", "refused", code != 0, out[-200:])
-    code, out = git("push", "--force", "origin", f"HEAD~1:{default}", cwd=d)
-    record("N3", f"force-push / rewrite {default}", "refused", code != 0, out[-200:])
+    # A real rewrite: a parentless commit with main's tree, so the push can only land as a non-fast-forward.
+    rewrite = subprocess.run(["git", "-c", "user.name=negtest", "-c", "user.email=negtest@invalid", "commit-tree",
+                              f"origin/{default}^{{tree}}", "-m", "negtest history rewrite"],
+                             cwd=d, capture_output=True, text=True).stdout.strip()
+    code, out = git("push", "--force", "origin", f"{rewrite}:refs/heads/{default}", cwd=d)
+    record("N3", f"force-push / rewrite {default}", "refused", bool(rewrite) and code != 0 and "up-to-date" not in out, out[-200:])
     code, out = git("push", "origin", f"HEAD:refs/heads/feature/negtest-{STAMP}", cwd=d)
     record("N4", "create a branch outside agent/*", "refused (ruleset)", code != 0, out[-200:])
     code, out = git("push", "origin", f"HEAD:refs/tags/negtest-{STAMP}", cwd=d)
@@ -116,8 +120,15 @@ with tempfile.TemporaryDirectory() as d:
 r = gh(TOKEN, "DELETE", f"/repos/{REPO}/git/refs/heads/{default}")
 record("N7", f"delete {default}", "refused", r.status_code in (403, 422), r.status_code)
 if pr:
+    # Mark the PR ready first, so a refusal comes from the ruleset (review required), not from draft status.
+    node0 = gh(TOKEN, "GET", f"/repos/{REPO}/pulls/{pr}").json().get("node_id")
+    requests.post(f"{API}/graphql", headers={"Authorization": f"bearer {TOKEN}"}, timeout=30,
+                  json={"query": "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){clientMutationId}}", "variables": {"id": node0}})
+    is_draft = gh(TOKEN, "GET", f"/repos/{REPO}/pulls/{pr}").json().get("draft")
     r = gh(TOKEN, "PUT", f"/repos/{REPO}/pulls/{pr}/merge", json={"merge_method": "squash"})
-    record("N8", "merge its own PR", "refused (ruleset: review required, App cannot bypass)", r.status_code in (403, 405, 409, 422), r.status_code)
+    record("N8", "merge its own PR (marked ready, not draft)", "refused (ruleset: review required, App cannot bypass)",
+           r.status_code in (403, 405, 409, 422) and not is_draft,
+           f"{r.status_code} {r.json().get('message', '')}" + (" (PR still draft: inconclusive)" if is_draft else ""))
     r = gh(TOKEN, "POST", f"/repos/{REPO}/pulls/{pr}/reviews", json={"event": "APPROVE", "body": "negtest self-approval"})
     record("N9", "approve its own PR", "refused", r.status_code in (403, 422), r.status_code)
     q = 'mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id}){clientMutationId}}'
